@@ -100,15 +100,15 @@ export const Navbar: React.FC = () => {
 
             {/* Right side: Status Indicator, Error Display, Connect/Disconnect Button */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                 {/* Display error message if present and not loading */}
-                 {error && !isLoadingOverall && (
-                     <span
-                        style={{ color: '#f87171', fontSize: '0.8em', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid #ef4444', padding: '2px 5px', borderRadius: '3px'}}
+                {/* Display error message if present and not loading */}
+                {error && !isLoadingOverall && (
+                    <span
+                        style={{ color: '#f87171', fontSize: '0.8em', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid #ef4444', padding: '2px 5px', borderRadius: '3px' }}
                         title={error} // Show full error on hover
-                     >
-                         ⚠️ Error: {error.split(':')[1]?.trim() ?? error} {/* Show simplified error */}
+                    >
+                        ⚠️ Error: {error.split(':')[1]?.trim() ?? error} {/* Show simplified error */}
                     </span>
-                 )}
+                )}
 
                 {/* Connection Status Indicator */}
                 <ConnectionIndicator
@@ -120,13 +120,13 @@ export const Navbar: React.FC = () => {
                 {/* Conditional Connect/Disconnect Button */}
                 {isConnected && walletState ? (
                     // --- Disconnect Button ---
-                     <button
+                    <button
                         onClick={disconnectWallet} // Use disconnectWallet from context
                         style={buttonStyle('#ef4444')} // Red background
                         title={`Disconnect wallet: ${walletState.address}`} // Tooltip with full address
-                     >
-                         Disconnect {displayAddress} {/* Show shortened address */}
-                     </button>
+                    >
+                        Disconnect {displayAddress} {/* Show shortened address */}
+                    </button>
                 ) : (
                     // --- Connect Button ---
                     <button

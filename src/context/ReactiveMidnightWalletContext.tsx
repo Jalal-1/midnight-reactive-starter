@@ -113,22 +113,26 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
         } catch (err) {
             console.error("Error during _establishConnection:", err);
             const apiError = err as APIError;
+            // ignore error
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const code = (err as any)?.code ?? apiError?.code;
             const msg = (err as Error)?.message || apiError?.reason || 'Unknown connection error';
 
             // Only show error if it wasn't the silent initial check OR if it's not the -3 code
             if (!initialCheck && !(code === -3 || String(msg).includes('enable() first'))) {
-                 setError(`Connection failed: ${msg}${code ? ` (Code: ${code})` : ''}`);
+                setError(`Connection failed: ${msg}${code ? ` (Code: ${code})` : ''}`);
             } else if (!initialCheck) {
                 // If it *was* the -3 error during a manual connect, maybe log differently or ignore UI error
-                 console.warn("Enable() failed, likely waiting for user prompt (or prompt was cancelled).");
-                 // Optionally set an info message here if needed, but often just letting the button re-enable is enough
+                console.warn("Enable() failed, likely waiting for user prompt (or prompt was cancelled).");
+                // Optionally set an info message here if needed, but often just letting the button re-enable is enough
             }
 
             // Reset state on any error during establishment
             setWalletApi(null); setServiceUris(null); setWalletState(null); setWalletName(null);
             return false; // Indicate failure
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [targetWalletName]); // dependency
 
     // --- Manual Connect Function (Public) ---
@@ -196,7 +200,7 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
             console.log("No wallet connector found on initial load.");
             setIsCheckingStatus(false); // Mark initial check as complete
         }
-    // Fix 1: Add setIsLoading (and others used inside) to dependency array
+        // Fix 1: Add setIsLoading (and others used inside) to dependency array
     }, [getConnector, _establishConnection, setIsCheckingStatus]); // Ensure effect runs once
 
     // --- Polling Effect ---
@@ -226,8 +230,8 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
 
             // Polling for state changes (detects account switch)
             statePollIntervalRef.current = setInterval(async () => {
-                 const currentWalletApi = walletApi; // Use captured API
-                 if (currentWalletApi) {
+                const currentWalletApi = walletApi; // Use captured API
+                if (currentWalletApi) {
                     try {
                         const newState = await currentWalletApi.state();
                         if (newState.address !== walletState?.address) {
@@ -238,15 +242,15 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
                         console.error("Error polling wallet state:", pollError);
                         disconnectWallet(); // Disconnect on error
                     }
-                 } else {
-                     // Should not happen if isConnected is true, but clear just in case
-                     clearAllIntervals();
-                 }
+                } else {
+                    // Should not happen if isConnected is true, but clear just in case
+                    clearAllIntervals();
+                }
             }, POLLING_INTERVAL_MS);
 
         } else {
             // If not connected, ensure intervals are cleared
-             clearAllIntervals();
+            clearAllIntervals();
         }
 
         // Cleanup: clear intervals on unmount or when connection status changes
