@@ -10,31 +10,33 @@ import React, {
     useEffect,
     useRef
 } from 'react';
-import type {
+import {
     DAppConnectorAPI,
     DAppConnectorWalletAPI,
     DAppConnectorWalletState,
     ServiceUriConfig,
-    APIError
+    APIError,
+    ErrorCodes
 } from '@midnight-ntwrk/dapp-connector-api';
 
-const POLLING_INTERVAL_MS = 3000;
+const STATUS_POLLING_INTERVAL_MS = 3000;
+const STATE_POLLING_INTERVAL_MS = 5000;
+const APPROVAL_POLLING_INTERVAL_MS = 500;
+const APPROVAL_POLLING_TIMEOUT_MS = 15000; // 15 seconds
 
 // --- Context State Definition ---
-// Define the data and functions provided by the context
 interface ReactiveMidnightWalletContextState {
     walletApi: DAppConnectorWalletAPI | null;
     serviceUris: ServiceUriConfig | null;
     walletState: DAppConnectorWalletState | null;
-    isConnected: boolean; // Derived from walletApi existence
-    // Provide the specific loading states:
-    isConnecting: boolean; // True during *manual* connection attempts initiated by user click
-    isCheckingStatus: boolean; // True during the initial load check or background polling
+    isConnected: boolean;
+    isConnecting: boolean;
+    isCheckingStatus: boolean;
     error: string | null;
+    infoMessage: string | null; // For guiding user during -3 error approval wait
     walletName: string | null;
-    connectWallet: () => Promise<void>; // Expose the manual trigger
+    connectWallet: () => Promise<void>;
     disconnectWallet: () => void;
-    // Removed infoMessage as we rely on error/loading states now
 }
 
 // --- Context Creation ---
@@ -56,14 +58,15 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
     const [serviceUris, setServiceUris] = useState<ServiceUriConfig | null>(null);
     const [walletState, setWalletState] = useState<DAppConnectorWalletState | null>(null);
     const [isConnecting, setIsConnecting] = useState<boolean>(false);
-    const [isCheckingStatus, setIsCheckingStatus] = useState<boolean>(true); // Start true for initial check
+    const [isCheckingStatus, setIsCheckingStatus] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
+    const [infoMessage, setInfoMessage] = useState<string | null>(null); // To guide user
     const [walletName, setWalletName] = useState<string | null>(null);
 
-    // Derived state for convenience (used internally and potentially by consumers)
     const isConnected = !!walletApi;
     const statusPollIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const statePollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const approvalPollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
     // --- Get Connector ---
     const getConnector = useCallback((): DAppConnectorAPI | null => {
@@ -77,75 +80,140 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
     const clearAllIntervals = useCallback(() => {
         if (statusPollIntervalRef.current) clearInterval(statusPollIntervalRef.current);
         if (statePollIntervalRef.current) clearInterval(statePollIntervalRef.current);
+        if (approvalPollIntervalRef.current) clearInterval(approvalPollIntervalRef.current);
         statusPollIntervalRef.current = null;
         statePollIntervalRef.current = null;
-        // console.log("Polling intervals cleared."); // Optional debug log
+        approvalPollIntervalRef.current = null;
     }, []);
 
-    // --- Establish Connection Logic (Internal) ---
-    // Fetches API, state, URIs, sets connected state. Returns success status.
-    const _establishConnection = useCallback(async (connector: DAppConnectorAPI, initialCheck: boolean = false) => {
-        console.log(`_establishConnection called (initialCheck: ${initialCheck})`);
-        // Don't set isConnecting here, that's for manual attempts.
-        // isCheckingStatus should already be true if called initially.
-        setError(null); // Clear previous errors before attempting
-
+     // --- Internal Function to Fetch State/URIs ---
+     const _fetchDetails = useCallback(async (connector: DAppConnectorAPI, enabledApi: DAppConnectorWalletAPI) => {
+        console.log("Fetching wallet state and URIs...");
         try {
-            const enabledApi = await connector.enable();
-            console.log("enable() successful.");
-
             const [fetchedState, fetchedUris] = await Promise.all([
                 enabledApi.state(),
                 connector.serviceUriConfig()
             ]);
-            console.log("Wallet state and URIs fetched.");
+             setWalletState(fetchedState);
+             setServiceUris(fetchedUris);
+             console.log(`Details fetched. Address: ${fetchedState.address}`);
+             return true;
+        } catch (fetchErr) {
+             console.error("Error fetching details after enable:", fetchErr);
+             setError("Connected, but failed to fetch wallet details.");
+             setWalletState(null);
+             setServiceUris(null);
+             return false;
+        }
+    }, []);
 
-            // --- Success Path ---
+
+    // --- Establish Connection Logic (Internal) ---
+    // Tries to get API, then fetches details. Returns success status.
+    const _establishConnection = useCallback(async (connector: DAppConnectorAPI, isInitialCheck: boolean = false): Promise<boolean> => {
+        console.log(`_establishConnection called (isInitialCheck: ${isInitialCheck})`);
+        // Don't clear error/info here, let the caller manage UI state
+
+        try {
+            const enabledApi = await connector.enable();
+            console.log("enable() successful.");
             setWalletApi(enabledApi);
             setWalletName(connector.name);
-            setWalletState(fetchedState);
-            setServiceUris(fetchedUris);
-            // isConnected is derived, no need to set directly
-            setError(null);
-            console.log(`Connection established. Address: ${fetchedState.address}`);
-            return true; // Indicate success
+
+            // Fetch details and update state
+            const detailsFetched = await _fetchDetails(connector, enabledApi);
+
+            // Only consider fully connected if details were also fetched
+            if (detailsFetched) {
+                 setError(null); // Clear errors on full success
+                 setInfoMessage(null);
+                 return true; // Full success
+            } else {
+                 // State already updated with error by _fetchDetails
+                 return false; // Partial success (API obtained, but details failed)
+            }
 
         } catch (err) {
             console.error("Error during _establishConnection:", err);
             const apiError = err as APIError;
-            // ignore error
+            const code = (err as { code?: number | string }).code;
+            const msg = (err instanceof Error ? err.message : '') || apiError?.reason || 'Unknown connection error';
 
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const code = (err as any)?.code ?? apiError?.code;
-            const msg = (err as Error)?.message || apiError?.reason || 'Unknown connection error';
+            // Reset partial state from this attempt
+            setWalletApi(null); setServiceUris(null); setWalletState(null); setWalletName(null);
 
-            // Only show error if it wasn't the silent initial check OR if it's not the -3 code
-            if (!initialCheck && !(code === -3 || String(msg).includes('enable() first'))) {
+            const isApprovalError = code === -3 || String(msg).includes('enable() first');
+
+            if (isApprovalError && !isInitialCheck) {
+                // Signal specifically that approval polling should start for manual attempts
+                console.warn("Detected -3 error during manual connection attempt.");
+                return false; // Indicate failure that should trigger polling
+            } else if (!isInitialCheck) {
+                // For other errors during manual attempt, set the error state
                 setError(`Connection failed: ${msg}${code ? ` (Code: ${code})` : ''}`);
-            } else if (!initialCheck) {
-                // If it *was* the -3 error during a manual connect, maybe log differently or ignore UI error
-                console.warn("Enable() failed, likely waiting for user prompt (or prompt was cancelled).");
-                // Optionally set an info message here if needed, but often just letting the button re-enable is enough
+                return false; // Indicate failure
+            } else {
+                 // For errors during initial check (including -3), fail silently
+                 console.log("Initial check failed to establish connection silently.");
+                 return false;
+            }
+        }
+    }, [targetWalletName, _fetchDetails]); // Added _fetchDetails
+
+    // --- Start Polling for Approval after -3 Error ---
+    const _startApprovalPolling = useCallback((connector: DAppConnectorAPI) => {
+        clearAllIntervals();
+        // Set info message *before* clearing intervals potentially set by _establishConnection error
+        setInfoMessage(`Connection prompt likely appeared in ${connector.name}. Please approve it. Checking status...`);
+        // Keep isConnecting true
+
+        let attempts = 0;
+        const maxAttempts = APPROVAL_POLLING_TIMEOUT_MS / APPROVAL_POLLING_INTERVAL_MS;
+
+        approvalPollIntervalRef.current = setInterval(async () => {
+            attempts++;
+            console.log(`Polling for approval: attempt ${attempts}`);
+            if (attempts > maxAttempts) {
+                console.log("Approval polling timed out.");
+                clearAllIntervals();
+                setError("Connection timed out. Did you approve the request in the wallet?");
+                setInfoMessage(null);
+                setIsConnecting(false); // Stop loading
+                return;
             }
 
-            // Reset state on any error during establishment
-            setWalletApi(null); setServiceUris(null); setWalletState(null); setWalletName(null);
-            return false; // Indicate failure
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [targetWalletName]); // dependency
+            try {
+                const enabled = await connector.isEnabled();
+                console.log(`Approval poll check: isEnabled() = ${enabled}`);
+                if (enabled) {
+                    console.log("Approval detected! Re-attempting connection.");
+                    clearAllIntervals(); // Stop this poll
+                    setInfoMessage("Approval detected. Finalizing connection...");
+                    // Try establishing connection again
+                    const success = await _establishConnection(connector, false);
+                    setInfoMessage(null); // Clear info message now
+                    setIsConnecting(false); // Stop loading
+                }
+            } catch (pollErr) {
+                console.error("Error during approval polling:", pollErr);
+                clearAllIntervals();
+                setError("An error occurred while checking wallet approval status.");
+                setInfoMessage(null);
+                setIsConnecting(false);
+            }
+        }, APPROVAL_POLLING_INTERVAL_MS);
+
+    }, [clearAllIntervals, _establishConnection]);
 
     // --- Manual Connect Function (Public) ---
     const connectWallet = useCallback(async () => {
-        // Prevent connect if already connected or a manual connection is in progress
-        if (isConnected || isConnecting) {
-            console.log(`Connect wallet called but already ${isConnected ? 'connected' : 'connecting'}.`);
-            return;
-        }
+        if (isConnecting || isConnected) return;
 
         console.log("Manual connectWallet triggered.");
-        setIsConnecting(true); // Set flag for manual attempt
-        setError(null);        // Clear errors
+        setIsConnecting(true);
+        setError(null);
+        setInfoMessage(null);
+        clearAllIntervals(); // Stop background polling
 
         const connector = getConnector();
         if (!connector) {
@@ -154,20 +222,29 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
             return;
         }
 
-        // Call the internal logic, wait for it to finish
-        await _establishConnection(connector, false); // false indicates it's a manual (non-initial) attempt
+        const success = await _establishConnection(connector, false);
 
-        setIsConnecting(false); // Mark manual attempt finished regardless of outcome
-    }, [isConnected, isConnecting, getConnector, targetWalletName, _establishConnection]);
+        if (!success && !error) {
+             // Failure without a specific error message implies the -3 code occurred
+             _startApprovalPolling(connector);
+             // Leave isConnecting = true; polling will set it false
+        } else {
+             // Success or other error occurred, stop the manual connecting indicator
+             setIsConnecting(false);
+        }
+
+    }, [isConnected, isConnecting, getConnector, targetWalletName, _establishConnection, _startApprovalPolling, error, clearAllIntervals]);
 
     // --- Disconnect Function (Public) ---
     const disconnectWallet = useCallback(() => {
+        // ... (same as before) ...
         console.log("Disconnecting wallet...");
         clearAllIntervals();
         setWalletApi(null);
         setServiceUris(null);
         setWalletState(null);
         setError(null);
+        setInfoMessage(null);
         setIsConnecting(false);
         setIsCheckingStatus(false);
         setWalletName(null);
@@ -176,7 +253,7 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
     // --- Initial Load Check ---
     useEffect(() => {
         console.log("Effect: Initial load check mounting.");
-        setIsCheckingStatus(true); // Indicate we are checking status
+        setIsCheckingStatus(true);
         const connector = getConnector();
 
         if (connector) {
@@ -184,94 +261,82 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
                 .then(enabled => {
                     console.log(`Initial isEnabled: ${enabled}`);
                     if (enabled) {
-                        return _establishConnection(connector, true); // true = initial silent check
+                        // Attempt to establish connection silently
+                        return _establishConnection(connector, true);
                     }
-                    return false; // Not enabled, no connection needed yet
+                    return false;
                 })
                 .catch(err => {
                     console.error("Error during initial isEnabled check:", err);
-                    setError("Could not check initial wallet status."); // Let user know check failed
                 })
                 .finally(() => {
-                    // Fix 1: Add setIsLoading to dependency array
-                    setIsCheckingStatus(false); // Mark initial check as complete
+                    setIsCheckingStatus(false); // Initial check complete
                 });
         } else {
-            console.log("No wallet connector found on initial load.");
-            setIsCheckingStatus(false); // Mark initial check as complete
+            console.log("No wallet connector found on mount.");
+            setIsCheckingStatus(false);
         }
-        // Fix 1: Add setIsLoading (and others used inside) to dependency array
-    }, [getConnector, _establishConnection, setIsCheckingStatus]); // Ensure effect runs once
+        // Cleanup function for safety
+        return () => { clearAllIntervals() };
+    }, [getConnector, _establishConnection, clearAllIntervals]); // Dependencies
 
-    // --- Polling Effect ---
+    // --- Background Polling Effect ---
     useEffect(() => {
-        // Only poll if connected
-        if (isConnected && walletApi) {
-            console.log("Effect: Starting status & state polling.");
+        clearAllIntervals(); // Clear any previous intervals first
 
-            // Polling for isEnabled (detects disconnect from extension)
+        if (isConnected && walletApi) {
+            console.log("Effect: Starting background status & state polling.");
+            setIsCheckingStatus(true); // Use this to indicate background activity
+
+            // Poll isEnabled
             statusPollIntervalRef.current = setInterval(async () => {
                 const connector = getConnector();
-                if (!connector) { // Stop if connector disappears
-                    disconnectWallet();
-                    return;
-                }
+                if (!connector) { disconnectWallet(); return; }
                 try {
-                    const enabled = await connector.isEnabled();
-                    if (!enabled) {
-                        console.log("Polling detected wallet disabled. Disconnecting.");
+                    if (!(await connector.isEnabled())) {
+                        console.log("Background poll detected wallet disabled. Disconnecting.");
                         disconnectWallet();
                     }
-                } catch (pollError) {
-                    console.error("Error polling isEnabled:", pollError);
-                    disconnectWallet(); // Disconnect on error
-                }
-            }, POLLING_INTERVAL_MS);
+                } catch (pollError) { console.error("Error polling isEnabled:", pollError); disconnectWallet(); }
+            }, STATUS_POLLING_INTERVAL_MS);
 
-            // Polling for state changes (detects account switch)
+            // Poll state
             statePollIntervalRef.current = setInterval(async () => {
-                const currentWalletApi = walletApi; // Use captured API
-                if (currentWalletApi) {
+                 const currentWalletApi = walletApi;
+                 if (currentWalletApi) {
                     try {
                         const newState = await currentWalletApi.state();
-                        if (newState.address !== walletState?.address) {
-                            console.log("Polling detected account switch. Updating state.");
-                            setWalletState(newState); // Update local state
+                        if (newState.address !== (walletState ? walletState.address : null)) {
+                            console.log("Background poll detected account switch. Updating state.");
+                            setWalletState(newState);
                         }
-                    } catch (pollError) {
-                        console.error("Error polling wallet state:", pollError);
-                        disconnectWallet(); // Disconnect on error
-                    }
-                } else {
-                    // Should not happen if isConnected is true, but clear just in case
-                    clearAllIntervals();
-                }
-            }, POLLING_INTERVAL_MS);
+                    } catch (pollError) { console.error("Error polling wallet state:", pollError); disconnectWallet(); }
+                 }
+            }, STATE_POLLING_INTERVAL_MS);
+
+            setIsCheckingStatus(false); // Background polling is running, not actively 'checking' in terms of UI blocking
 
         } else {
-            // If not connected, ensure intervals are cleared
-            clearAllIntervals();
+             setIsCheckingStatus(false); // Ensure false if not connected
         }
 
-        // Cleanup: clear intervals on unmount or when connection status changes
+        // Cleanup function
         return () => {
-            console.log("Effect cleanup: Clearing polling intervals.");
+            console.log("Effect cleanup: Clearing background polling intervals.");
             clearAllIntervals();
         };
-        // Added walletState?.address to dependencies to restart state polling if address changes
     }, [isConnected, walletApi, walletState?.address, getConnector, disconnectWallet, clearAllIntervals]);
 
     // --- Context Value ---
-    // Fix 2: Provide the individual loading states, not the derived one.
     const value: ReactiveMidnightWalletContextState = {
         walletApi,
         serviceUris,
         walletState,
-        isConnected, // Keep the derived boolean for convenience
-        isConnecting, // Provide the manual connection attempt flag
-        isCheckingStatus, // Provide the background check/initial load flag
+        isConnected,
+        isConnecting,
+        isCheckingStatus,
         error,
-        // infoMessage removed, using error state or button state now
+        infoMessage, // Provide info message for the -3 flow
         walletName,
         connectWallet,
         disconnectWallet,
@@ -286,7 +351,6 @@ export const ReactiveMidnightWalletProvider: React.FC<ReactiveMidnightWalletProv
 };
 
 // --- Custom Hook ---
-// Update the hook name if you changed the context name
 export const useReactiveMidnightWallet = (): ReactiveMidnightWalletContextState => {
     const context = useContext(ReactiveMidnightWalletContext);
     if (!context) {
