@@ -21,7 +21,6 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className} style={{ margin: 0, backgroundColor: '#111827', color: '#d1d5db' }}>
-        {/* Use the new Provider */}
         <ReactiveMidnightWalletProvider>
           <Navbar />
           <main style={{ padding: '1rem 2rem' }}>
